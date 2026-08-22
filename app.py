@@ -114,6 +114,16 @@ def unique_name(existing, base: str, ext: str) -> str:
     return candidate
 
 
+def parse_created(text):
+    """Apps Script 가 보내온 제출일시(한국 시각) 문자열을 날짜로 바꾼다."""
+    if not text:
+        return None
+    try:
+        return datetime.strptime(str(text)[:16], "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+
+
 def week_start(day: date) -> date:
     """그 주의 일요일."""
     return day - timedelta(days=(day.weekday() + 1) % 7)
@@ -141,6 +151,7 @@ def list_items():
                 "name": f["name"],
                 "size": int(f.get("size") or 0),
                 "link": f.get("link"),
+                "created": parse_created(f.get("created")),
             }
             for f in data.get("files", [])
         ]
@@ -150,7 +161,13 @@ def list_items():
         path = os.path.join(UPLOAD_DIR, name)
         if os.path.isfile(path):
             items.append(
-                {"id": name, "name": name, "size": os.path.getsize(path), "link": None}
+                {
+                    "id": name,
+                    "name": name,
+                    "size": os.path.getsize(path),
+                    "link": None,
+                    "created": datetime.fromtimestamp(os.path.getmtime(path)),
+                }
             )
     return items
 
@@ -336,11 +353,30 @@ if st.checkbox("관리자 확인용", key="admin_open"):
             if type_choice != "전체":
                 records = [r for r in records if r[1]["type"] == type_choice]
 
+            # ---- 묶는 기준 (활동일자 / 제출일시) ----
+            has_created = any(i.get("created") for i, _ in records)
+            basis = "활동일자"
+            if has_created:
+                basis = st.radio(
+                    "묶는 기준",
+                    options=["활동일자", "제출일시"],
+                    horizontal=True,
+                    key="admin_basis",
+                    help="활동일자는 서포터즈가 고른 날짜, 제출일시는 실제로 올린 시각입니다.",
+                )
+
+            def basis_date(item, info):
+                if basis == "제출일시":
+                    return item["created"].date() if item.get("created") else None
+                return info["date"]
+
             # ---- 주차로 묶기 ----
             weeks = {}
             for item, info in records:
-                key = week_start(info["date"]) if info["date"] else None
-                weeks.setdefault(key, []).append((item, info))
+                key = basis_date(item, info)
+                weeks.setdefault(week_start(key) if key else None, []).append(
+                    (item, info)
+                )
 
             week_keys = sorted([k for k in weeks if k is not None], reverse=True)
             labels = ["전체 보기"] + [
@@ -362,14 +398,27 @@ if st.checkbox("관리자 확인용", key="admin_open"):
             else:
                 shown = weeks[week_keys[labels.index(picked) - 1]]
 
-            shown = sorted(
-                shown,
-                key=lambda r: (r[1]["date"] or date.min, r[1]["name"]),
-                reverse=True,
-            )
+            if basis == "제출일시":
+                shown = sorted(
+                    shown,
+                    key=lambda r: (r[0].get("created") or datetime.min, r[1]["name"]),
+                    reverse=True,
+                )
+            else:
+                shown = sorted(
+                    shown,
+                    key=lambda r: (r[1]["date"] or date.min, r[1]["name"]),
+                    reverse=True,
+                )
 
             # ---- 선택한 주차 전체를 ZIP으로 (누를 때만 내려받음) ----
-            zip_key = f"zip::{picked}::{type_choice}"
+            if not has_created:
+                st.caption(
+                    "제출일시로 보려면 Apps Script 코드를 최신본으로 바꾸고 "
+                    "다시 배포해야 합니다."
+                )
+
+            zip_key = f"zip::{picked}::{type_choice}::{basis}"
             if shown:
                 if st.session_state.get("zip_ready") == zip_key:
                     st.download_button(
@@ -413,7 +462,10 @@ if st.checkbox("관리자 확인용", key="admin_open"):
                     col3 = None
 
                 col1.write(f"**{item['name']}**")
-                col1.caption(f"{item['size'] / 1024:,.0f}KB")
+                detail = f"{item['size'] / 1024:,.0f}KB"
+                if item.get("created"):
+                    detail += f"  ·  제출 {item['created']:%Y-%m-%d %H:%M}"
+                col1.caption(detail)
 
                 if item["link"]:
                     col2.link_button("열기", item["link"])
