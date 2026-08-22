@@ -24,8 +24,8 @@ def get_secret(key: str, fallback: str) -> str:
         return fallback
 
 
-PASSWORD = get_secret("APP_PASSWORD", "change-me")
-ADMIN_PASSWORD = get_secret("ADMIN_PASSWORD", "change-me-admin")
+PASSWORD = get_secret("APP_PASSWORD", "서포터즈")
+ADMIN_PASSWORD = get_secret("ADMIN_PASSWORD", "서포터즈관리자")
 
 
 def check_password(entered: str, real: str) -> bool:
