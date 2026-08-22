@@ -29,8 +29,8 @@ def get_secret(key: str, fallback: str) -> str:
         return fallback
 
 
-PASSWORD = get_secret("APP_PASSWORD", "1234")
-ADMIN_PASSWORD = get_secret("ADMIN_PASSWORD", "7818")
+PASSWORD = get_secret("APP_PASSWORD", "change-me")
+ADMIN_PASSWORD = get_secret("ADMIN_PASSWORD", "change-me-admin")
 
 
 def check_password(entered: str, real: str) -> bool:
@@ -82,6 +82,16 @@ def week_label(start: date) -> str:
     nth = (start.day - 1) // 7 + 1
     year = f"{start.year}년 " if start.year != date.today().year else ""
     return f"{year}{start.month}월 {nth}주 ({start.month}/{start.day}~{end.month}/{end.day})"
+
+
+def delete_stored(filename: str) -> bool:
+    """업로드 폴더 안의 파일만 삭제. 경로를 벗어나면 거부."""
+    base = os.path.abspath(UPLOAD_DIR)
+    target = os.path.abspath(os.path.join(base, os.path.basename(filename)))
+    if not target.startswith(base + os.sep) or not os.path.isfile(target):
+        return False
+    os.remove(target)
+    return True
 
 
 def download_name(info: dict, seq: int = 1) -> str:
@@ -191,9 +201,13 @@ if submitted:
 # ----------------------------------------------------------------------
 # 관리자
 # ----------------------------------------------------------------------
-with st.expander("관리자 확인용"):
+if st.checkbox("관리자 확인용", key="admin_open"):
     admin_pw = st.text_input("관리자 비밀번호", type="password", key="admin_pw")
     if admin_pw and check_password(admin_pw, ADMIN_PASSWORD):
+        flash = st.session_state.pop("admin_flash", None)
+        if flash:
+            st.success(flash)
+
         st.subheader("📋 제출 현황")
         stored_files = sorted(os.listdir(UPLOAD_DIR), reverse=True)
 
@@ -285,15 +299,46 @@ with st.expander("관리자 확인용"):
                 st.divider()
 
             # ---- 개별 목록 ----
+            delete_mode = st.toggle(
+                "🗑 삭제 모드 (잘못 올라온 파일 정리)", key="admin_delete_mode"
+            )
+            if delete_mode:
+                st.caption("삭제한 파일은 복구할 수 없습니다.")
+            pending = st.session_state.get("pending_delete")
+
             for stored, new_name in rows:
                 path = os.path.join(UPLOAD_DIR, stored)
                 size_kb = os.path.getsize(path) / 1024
-                col1, col2 = st.columns([4, 1])
+
+                if delete_mode:
+                    col1, col2, col3 = st.columns([3, 1, 1])
+                else:
+                    col1, col2 = st.columns([4, 1])
+                    col3 = None
+
                 col1.write(f"**{new_name}**")
                 col1.caption(f"원본: {stored}  ·  {size_kb:,.0f}KB")
                 with open(path, "rb") as f:
                     col2.download_button(
                         "받기", f.read(), file_name=new_name, key=f"dl_{stored}"
                     )
+                if col3 is not None and col3.button("삭제", key=f"del_{stored}"):
+                    st.session_state.pending_delete = stored
+                    st.rerun()
+
+                # 삭제 전 한 번 더 확인
+                if pending == stored:
+                    st.warning(f"'{new_name}' 을(를) 삭제할까요? 되돌릴 수 없습니다.")
+                    yes, no = st.columns(2)
+                    if yes.button("네, 삭제합니다", key=f"yes_{stored}"):
+                        if delete_stored(stored):
+                            st.session_state.admin_flash = f"'{new_name}' 을(를) 삭제했습니다."
+                        else:
+                            st.session_state.admin_flash = "삭제하지 못했습니다."
+                        st.session_state.pending_delete = None
+                        st.rerun()
+                    if no.button("취소", key=f"no_{stored}"):
+                        st.session_state.pending_delete = None
+                        st.rerun()
     elif admin_pw:
         st.error("관리자 비밀번호가 다릅니다.")
