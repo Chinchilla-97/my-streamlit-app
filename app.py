@@ -2,7 +2,7 @@ import hmac
 import os
 import re
 import unicodedata
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import streamlit as st
 
@@ -11,6 +11,7 @@ import streamlit as st
 # ----------------------------------------------------------------------
 UPLOAD_DIR = "activity_logs"
 ALLOWED_EXT = {".hwp", ".hwpx", ".jpg", ".jpeg", ".png", ".pdf"}
+ACTIVITY_TYPES = ["대면", "비대면"]
 MAX_FILE_MB = 20
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -24,12 +25,15 @@ def get_secret(key: str, fallback: str) -> str:
         return fallback
 
 
-PASSWORD = get_secret("APP_PASSWORD", "supporters")
-ADMIN_PASSWORD = get_secret("ADMIN_PASSWORD", "adminsupporters")
+PASSWORD = get_secret("APP_PASSWORD", "change-me")
+ADMIN_PASSWORD = get_secret("ADMIN_PASSWORD", "change-me-admin")
 
 
 def check_password(entered: str, real: str) -> bool:
-    return hmac.compare_digest(str(entered), str(real))
+    # 한글 등 비ASCII 문자를 쓰려면 바이트로 변환해서 비교해야 함
+    return hmac.compare_digest(
+        str(entered).encode("utf-8"), str(real).encode("utf-8")
+    )
 
 
 def safe_name(text: str) -> str:
@@ -80,7 +84,18 @@ if st.button("로그아웃"):
 # ----------------------------------------------------------------------
 with st.form("log_upload_form", clear_on_submit=True):
     activist_name = st.text_input("활동가 성함 (본인 이름 입력)")
-    log_date = st.date_input("활동 일자", value=date.today())
+    log_date = st.date_input(
+        "활동 일자 (지난 날짜도 선택 가능)",
+        value=date.today(),
+        min_value=date.today() - timedelta(days=730),
+        max_value=date.today(),
+        format="YYYY-MM-DD",
+    )
+    activity_type = st.radio(
+        "활동 종류",
+        options=ACTIVITY_TYPES,
+        horizontal=True,
+    )
     uploaded_files = st.file_uploader(
         f"파일 첨부 (HWP, HWPX, JPG, PNG, PDF · 파일당 최대 {MAX_FILE_MB}MB)",
         type=[e.lstrip(".") for e in sorted(ALLOWED_EXT)],
@@ -107,7 +122,10 @@ if submitted:
                 skipped.append(f"{uploaded_file.name} (용량 초과)")
                 continue
 
-            target = unique_path(UPLOAD_DIR, f"{date_str}_{name_part}_{original}")
+            target = unique_path(
+                UPLOAD_DIR,
+                f"{date_str}_{activity_type}_{name_part}_{original}",
+            )
             try:
                 with open(target, "wb") as f:
                     f.write(uploaded_file.getbuffer())
@@ -132,6 +150,24 @@ with st.expander("관리자 확인용"):
         files = sorted(os.listdir(UPLOAD_DIR), reverse=True)
         if not files:
             st.info("아직 제출된 파일이 없습니다.")
+
+        counts = {t: sum(f"_{t}_" in n for n in files) for t in ACTIVITY_TYPES}
+        st.caption(
+            "  ·  ".join(f"{t} {c}건" for t, c in counts.items())
+            + f"  ·  전체 {len(files)}건"
+        )
+
+        choice = st.radio(
+            "활동 종류로 보기",
+            options=["전체"] + ACTIVITY_TYPES,
+            horizontal=True,
+            key="admin_filter",
+        )
+        if choice != "전체":
+            files = [n for n in files if f"_{choice}_" in n]
+            if not files:
+                st.info(f"{choice} 활동 제출 내역이 없습니다.")
+
         for name in files:
             path = os.path.join(UPLOAD_DIR, name)
             size_kb = os.path.getsize(path) / 1024
