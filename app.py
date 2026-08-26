@@ -137,6 +137,20 @@ def week_label(start: date) -> str:
     return f"{year}{start.month}월 {nth}주 ({start.month}/{start.day}~{end.month}/{end.day})"
 
 
+def case_key(item, info):
+    """활동 1건 = (활동가, 활동일자, 활동종류).
+    같은 사람이 같은 날 같은 종류로 여러 파일을 올려도 1건으로 센다.
+    파일명 규칙을 벗어난 '미분류'는 묶을 근거가 없으니 파일별로 센다."""
+    if info["date"] is None:
+        return ("미분류", item["id"])
+    return (info["name"], info["date"], info["type"])
+
+
+def count_cases(rows) -> int:
+    """[(item, info), ...] 목록에서 활동 건수를 센다."""
+    return len({case_key(i, f) for i, f in rows})
+
+
 # ----------------------------------------------------------------------
 # 저장소 (구글 드라이브 또는 임시 서버 폴더)
 # ----------------------------------------------------------------------
@@ -335,14 +349,19 @@ if st.checkbox("관리자 확인용", key="admin_open"):
                 records.append((item, info))
 
             # ---- 활동 종류로 걸러내기 ----
+            # 건수는 파일 개수가 아니라 (활동가 + 활동일자 + 활동종류) 조합으로 센다.
             types_present = [
                 t for t in ACTIVITY_TYPES + ["미분류"]
                 if any(i["type"] == t for _, i in records)
             ]
-            counts = {t: sum(i["type"] == t for _, i in records) for t in types_present}
+            counts = {
+                t: count_cases([r for r in records if r[1]["type"] == t])
+                for t in types_present
+            }
             st.caption(
                 "  ·  ".join(f"{t} {c}건" for t, c in counts.items())
-                + f"  ·  전체 {len(records)}건"
+                + f"  ·  전체 {count_cases(records)}건"
+                + f"  ·  파일 {len(records)}개"
             )
             type_choice = st.radio(
                 "활동 종류",
@@ -380,10 +399,10 @@ if st.checkbox("관리자 확인용", key="admin_open"):
 
             week_keys = sorted([k for k in weeks if k is not None], reverse=True)
             labels = ["전체 보기"] + [
-                f"{week_label(k)} · {len(weeks[k])}건" for k in week_keys
+                f"{week_label(k)} · {count_cases(weeks[k])}건" for k in week_keys
             ]
             if None in weeks:
-                labels.append(f"날짜 미확인 · {len(weeks[None])}건")
+                labels.append(f"날짜 미확인 · {count_cases(weeks[None])}건")
 
             picked = st.selectbox(
                 "주차 선택",
