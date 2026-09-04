@@ -348,7 +348,7 @@ if st.checkbox("관리자 확인용", key="admin_open"):
                 }
                 records.append((item, info))
 
-            # ---- 활동 종류로 걸러내기 ----
+            # ---- 전체 요약 ----
             # 건수는 파일 개수가 아니라 (활동가 + 활동일자 + 활동종류) 조합으로 센다.
             types_present = [
                 t for t in ACTIVITY_TYPES + ["미분류"]
@@ -363,6 +363,8 @@ if st.checkbox("관리자 확인용", key="admin_open"):
                 + f"  ·  전체 {count_cases(records)}건"
                 + f"  ·  파일 {len(records)}개"
             )
+
+            # ---- 활동 종류로 걸러내기 ----
             type_choice = st.radio(
                 "활동 종류",
                 options=["전체"] + types_present,
@@ -371,6 +373,19 @@ if st.checkbox("관리자 확인용", key="admin_open"):
             )
             if type_choice != "전체":
                 records = [r for r in records if r[1]["type"] == type_choice]
+
+            # ---- 대상자로 걸러내기 ----
+            names_present = sorted(
+                {i["name"] for _, i in records if i["name"] != "미분류"}
+            )
+            picked_people = st.multiselect(
+                "대상자 (비워두면 전체)",
+                options=names_present,
+                key="admin_people",
+                placeholder="이름을 골라주세요",
+            )
+            if picked_people:
+                records = [r for r in records if r[1]["name"] in picked_people]
 
             # ---- 묶는 기준 (활동일자 / 제출일시) ----
             has_created = any(i.get("created") for i, _ in records)
@@ -389,33 +404,86 @@ if st.checkbox("관리자 확인용", key="admin_open"):
                     return item["created"].date() if item.get("created") else None
                 return info["date"]
 
-            # ---- 주차로 묶기 ----
-            weeks = {}
-            for item, info in records:
-                key = basis_date(item, info)
-                weeks.setdefault(week_start(key) if key else None, []).append(
-                    (item, info)
+            # ---- 조회 범위 (주차별 / 기간 지정 / 전체) ----
+            view_mode = st.radio(
+                "조회 범위",
+                options=["주차별", "기간 지정", "전체"],
+                horizontal=True,
+                key="admin_view",
+            )
+
+            if view_mode == "주차별":
+                weeks = {}
+                for item, info in records:
+                    key = basis_date(item, info)
+                    weeks.setdefault(week_start(key) if key else None, []).append(
+                        (item, info)
+                    )
+
+                week_keys = sorted([k for k in weeks if k is not None], reverse=True)
+                labels = ["전체 보기"] + [
+                    f"{week_label(k)} · {count_cases(weeks[k])}건" for k in week_keys
+                ]
+                if None in weeks:
+                    labels.append(f"날짜 미확인 · {count_cases(weeks[None])}건")
+
+                picked = st.selectbox(
+                    "주차 선택",
+                    options=labels,
+                    index=1 if week_keys else 0,
+                    key="admin_week",
+                )
+                if picked == "전체 보기":
+                    shown = records
+                    range_label = "전체"
+                elif picked.startswith("날짜 미확인"):
+                    shown = weeks[None]
+                    range_label = "날짜미확인"
+                else:
+                    chosen_week = week_keys[labels.index(picked) - 1]
+                    shown = weeks[chosen_week]
+                    range_label = f"{chosen_week:%Y%m%d}주"
+
+            elif view_mode == "기간 지정":
+                dated = [d for d in (basis_date(i, f) for i, f in records) if d]
+                first, last = (min(dated), max(dated)) if dated else (
+                    date.today() - timedelta(days=30),
+                    date.today(),
+                )
+                span = st.date_input(
+                    "조회 기간 (시작일과 종료일을 차례로 누르세요)",
+                    value=(first, last),
+                    format="YYYY-MM-DD",
+                    key="admin_range",
+                )
+                # 시작일만 고른 상태에서는 값이 하나만 돌아온다
+                if isinstance(span, (list, tuple)):
+                    begin = span[0] if span else first
+                    finish = span[1] if len(span) > 1 else begin
+                else:
+                    begin = finish = span
+                if begin > finish:
+                    begin, finish = finish, begin
+
+                keep_unknown = st.checkbox(
+                    "날짜를 알 수 없는 항목도 함께 보기",
+                    key="admin_unknown",
+                    help="파일명 규칙을 벗어나 '미분류'로 잡힌 항목입니다.",
                 )
 
-            week_keys = sorted([k for k in weeks if k is not None], reverse=True)
-            labels = ["전체 보기"] + [
-                f"{week_label(k)} · {count_cases(weeks[k])}건" for k in week_keys
-            ]
-            if None in weeks:
-                labels.append(f"날짜 미확인 · {count_cases(weeks[None])}건")
+                shown = []
+                for item, info in records:
+                    when = basis_date(item, info)
+                    if when is None:
+                        if keep_unknown:
+                            shown.append((item, info))
+                    elif begin <= when <= finish:
+                        shown.append((item, info))
+                range_label = f"{begin:%Y%m%d}-{finish:%Y%m%d}"
 
-            picked = st.selectbox(
-                "주차 선택",
-                options=labels,
-                index=1 if week_keys else 0,
-                key="admin_week",
-            )
-            if picked == "전체 보기":
-                shown = records
-            elif picked.startswith("날짜 미확인"):
-                shown = weeks[None]
             else:
-                shown = weeks[week_keys[labels.index(picked) - 1]]
+                shown = records
+                range_label = "전체"
 
             if basis == "제출일시":
                 shown = sorted(
@@ -430,20 +498,36 @@ if st.checkbox("관리자 확인용", key="admin_open"):
                     reverse=True,
                 )
 
-            # ---- 선택한 주차 전체를 ZIP으로 (누를 때만 내려받음) ----
+            # ---- 지금 선택된 범위 요약 ----
+            summary = f"선택한 범위: {count_cases(shown)}건  ·  파일 {len(shown)}개"
+            if picked_people:
+                summary += f"  ·  대상자 {len(picked_people)}명"
+            st.caption(summary)
+
+            if not shown:
+                st.info("조건에 맞는 자료가 없습니다. 기간이나 대상자를 다시 골라주세요.")
+
+            # ---- 화면에 보이는 그대로 ZIP 으로 (누를 때만 내려받음) ----
             if not has_created:
                 st.caption(
                     "제출일시로 보려면 Apps Script 코드를 최신본으로 바꾸고 "
                     "다시 배포해야 합니다."
                 )
 
-            zip_key = f"zip::{picked}::{type_choice}::{basis}"
+            people_tag = ",".join(picked_people) if picked_people else "전체대상"
+            zip_key = f"zip::{view_mode}::{range_label}::{type_choice}::{basis}::{people_tag}"
+            zip_name = f"활동일지_{range_label}"
+            if len(picked_people) == 1:
+                zip_name += f"_{safe_field(picked_people[0])}"
+            if type_choice != "전체":
+                zip_name += f"_{safe_field(type_choice)}"
+
             if shown:
                 if st.session_state.get("zip_ready") == zip_key:
                     st.download_button(
                         f"📦 {len(shown)}개 파일 받기 (ZIP)",
                         st.session_state["zip_data"],
-                        file_name=f"활동일지_{picked.split(' · ')[0].replace(' ', '')}.zip",
+                        file_name=f"{zip_name}.zip",
                         mime="application/zip",
                     )
                 elif st.button(f"📦 {len(shown)}개 파일 ZIP으로 묶기"):
