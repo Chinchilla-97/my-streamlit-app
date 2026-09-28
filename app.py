@@ -407,6 +407,21 @@ if st.checkbox("관리자 확인용", key="admin_open"):
             if type_choice != "전체":
                 records = [r for r in records if r[1]["type"] == type_choice]
 
+            # ---- 서포터즈 이름으로 걸러내기 ----
+            people = {}
+            for _, info in records:
+                people[info["name"]] = people.get(info["name"], 0) + 1
+            name_options = ["전체"] + [
+                f"{n} ({c}건)" for n, c in sorted(people.items())
+            ]
+            name_pick = st.selectbox(
+                "서포터즈", options=name_options, key="admin_person"
+            )
+            person_tag = ""
+            if name_pick != "전체":
+                person_tag = name_pick.rsplit(" (", 1)[0]
+                records = [r for r in records if r[1]["name"] == person_tag]
+
             # ---- 묶는 기준 (활동일자 / 제출일시) ----
             has_created = any(i.get("created") for i, _ in records)
             basis = "활동일자"
@@ -503,13 +518,16 @@ if st.checkbox("관리자 확인용", key="admin_open"):
                     "다시 배포해야 합니다."
                 )
 
-            zip_key = f"zip::{picked}::{type_choice}::{basis}::{range_tag}"
+            zip_key = f"zip::{picked}::{type_choice}::{basis}::{range_tag}::{person_tag}"
             if shown:
                 if st.session_state.get("zip_ready") == zip_key:
                     st.download_button(
                         f"📦 {len(shown)}개 파일 받기 (ZIP)",
                         st.session_state["zip_data"],
-                        file_name=f"활동일지_{range_tag or picked.split(' · ')[0].replace(' ', '')}.zip",
+                        file_name=("활동일지_"
+                        + (range_tag or picked.split(" · ")[0].replace(" ", ""))
+                        + (f"_{person_tag}" if person_tag else "")
+                        + ".zip"),
                         mime="application/zip",
                     )
                 elif st.button(f"📦 {len(shown)}개 파일 ZIP으로 묶기"):
