@@ -438,17 +438,48 @@ if st.checkbox("관리자 확인용", key="admin_open"):
             ]
             if None in weeks:
                 labels.append(f"날짜 미확인 · {len(weeks[None])}건")
+            labels.append("📅 기간 직접 지정")
 
             picked = st.selectbox(
-                "주차 선택",
+                "기간 선택",
                 options=labels,
                 index=1 if week_keys else 0,
                 key="admin_week",
             )
+
+            range_tag = ""
             if picked == "전체 보기":
                 shown = records
             elif picked.startswith("날짜 미확인"):
                 shown = weeks[None]
+            elif picked.startswith("📅"):
+                dated = [(i, f) for i, f in records if basis_date(i, f)]
+                if dated:
+                    all_days = sorted(basis_date(i, f) for i, f in dated)
+                    first, last = all_days[0], all_days[-1]
+                else:
+                    first = last = date.today()
+
+                chosen = st.date_input(
+                    "볼 기간 (시작일 ~ 종료일)",
+                    value=(max(first, last - timedelta(days=30)), last),
+                    min_value=first,
+                    max_value=last,
+                    format="YYYY-MM-DD",
+                    key="admin_range",
+                )
+                if isinstance(chosen, (list, tuple)) and len(chosen) == 2:
+                    begin, finish = chosen
+                    shown = [
+                        (i, f) for i, f in dated if begin <= basis_date(i, f) <= finish
+                    ]
+                    range_tag = f"{begin:%Y%m%d}-{finish:%Y%m%d}"
+                    st.caption(
+                        f"{begin:%Y-%m-%d} ~ {finish:%Y-%m-%d}  ·  {len(shown)}건"
+                    )
+                else:
+                    shown = []
+                    st.info("종료일까지 선택해주세요.")
             else:
                 shown = weeks[week_keys[labels.index(picked) - 1]]
 
@@ -472,13 +503,13 @@ if st.checkbox("관리자 확인용", key="admin_open"):
                     "다시 배포해야 합니다."
                 )
 
-            zip_key = f"zip::{picked}::{type_choice}::{basis}"
+            zip_key = f"zip::{picked}::{type_choice}::{basis}::{range_tag}"
             if shown:
                 if st.session_state.get("zip_ready") == zip_key:
                     st.download_button(
                         f"📦 {len(shown)}개 파일 받기 (ZIP)",
                         st.session_state["zip_data"],
-                        file_name=f"활동일지_{picked.split(' · ')[0].replace(' ', '')}.zip",
+                        file_name=f"활동일지_{range_tag or picked.split(' · ')[0].replace(' ', '')}.zip",
                         mime="application/zip",
                     )
                 elif st.button(f"📦 {len(shown)}개 파일 ZIP으로 묶기"):
