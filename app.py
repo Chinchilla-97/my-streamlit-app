@@ -65,7 +65,14 @@ def _gas_once(body):
         location = res.headers.get("location")
         if not location:
             break
-        res = requests.get(location, timeout=GAS_TIMEOUT, allow_redirects=False)
+        if "googleusercontent.com" in location:
+            # 결과가 담긴 1회용 주소 → GET 으로 받아온다
+            res = requests.get(location, timeout=GAS_TIMEOUT, allow_redirects=False)
+        else:
+            # 아직 실행 주소 → POST 로 다시 보내야 내용이 유지된다
+            res = requests.post(
+                location, json=body, timeout=GAS_TIMEOUT, allow_redirects=False
+            )
         hops += 1
 
     if res.status_code != 200:
@@ -76,7 +83,7 @@ def _gas_once(body):
         raise GasBusy("응답 형식 오류")
 
 
-def gas_call(action: str, **payload):
+def gas_call(action: str, expect: str = None, **payload):
     """Apps Script 중계기에 요청을 보낸다. 통신 오류는 몇 번 다시 시도한다."""
     import time
 
@@ -98,6 +105,10 @@ def gas_call(action: str, **payload):
 
         if data.get("error"):  # 암호 불일치 등은 다시 시도해도 소용없음
             raise RuntimeError(data["error"])
+        if expect and expect not in data:
+            last = GasBusy("엉뚱한 응답을 받았습니다")
+            time.sleep(0.8 * (attempt + 1))
+            continue
         return data
 
     raise RuntimeError(
@@ -179,7 +190,7 @@ def week_label(start: date) -> str:
 def list_items():
     """[{id, name, size, link}] 목록을 돌려준다."""
     if GAS:
-        data = gas_call("list")
+        data = gas_call("list", expect="files")
         st.session_state["drive_folder_id"] = data.get("folderId")
         return [
             {
@@ -233,7 +244,7 @@ def save_item(name: str, data: bytes):
 
 def read_item(item) -> bytes:
     if GAS:
-        return base64.b64decode(gas_call("get", id=item["id"])["data"])
+        return base64.b64decode(gas_call("get", expect="data", id=item["id"])["data"])
     with open(os.path.join(UPLOAD_DIR, item["id"]), "rb") as f:
         return f.read()
 
@@ -531,17 +542,31 @@ if st.checkbox("관리자 확인용", key="admin_open"):
                         mime="application/zip",
                     )
                 elif st.button(f"📦 {len(shown)}개 파일 ZIP으로 묶기"):
-                    try:
-                        with st.spinner("파일을 모으는 중입니다…"):
-                            buffer = io.BytesIO()
-                            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                                for item, _ in shown:
-                                    zf.writestr(item["name"], read_item(item))
-                            st.session_state["zip_ready"] = zip_key
-                            st.session_state["zip_data"] = buffer.getvalue()
+                    buffer = io.BytesIO()
+                    failed = []
+                    progress = st.progress(0.0, text="파일을 모으는 중입니다…")
+                    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                        for idx, (item, _) in enumerate(shown, start=1):
+                            try:
+                                zf.writestr(item["name"], read_item(item))
+                            except Exception as err:
+                                failed.append(f"{item['name']} ({err})")
+                            progress.progress(
+                                idx / len(shown),
+                                text=f"파일을 모으는 중입니다… {idx}/{len(shown)}",
+                            )
+                    progress.empty()
+
+                    if failed:
+                        st.warning(
+                            f"{len(failed)}개 파일을 가져오지 못했습니다. "
+                            "다시 시도하면 대부분 해결됩니다.\n"
+                            + "\n".join(f"- {f}" for f in failed)
+                        )
+                    if len(failed) < len(shown):
+                        st.session_state["zip_ready"] = zip_key
+                        st.session_state["zip_data"] = buffer.getvalue()
                         st.rerun()
-                    except Exception as err:
-                        st.error(f"묶는 중 오류가 났습니다: {err}")
 
             st.divider()
 
