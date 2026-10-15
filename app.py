@@ -1,6 +1,8 @@
 import base64
+import hashlib
 import hmac
 import io
+import json
 import mimetypes
 import os
 import re
@@ -161,6 +163,13 @@ def unique_name(existing, base: str, ext: str) -> str:
     return candidate
 
 
+def person_code(name_key: str, pin: str) -> str:
+    """이름+확인번호를 되돌릴 수 없는 코드로 바꾼다. 번호 자체는 저장하지 않는다."""
+    salt = (GAS["secret"] if GAS else ADMIN_PASSWORD)
+    raw = f"{name_key}|{pin}|{salt}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
 def parse_created(text):
     """Apps Script 가 보내온 제출일시(한국 시각) 문자열을 날짜로 바꾼다."""
     if not text:
@@ -199,6 +208,7 @@ def list_items():
                 "size": int(f.get("size") or 0),
                 "link": f.get("link"),
                 "created": parse_created(f.get("created")),
+                "code": f.get("code") or "",
             }
             for f in data.get("files", [])
         ]
@@ -206,7 +216,7 @@ def list_items():
     items = []
     for name in os.listdir(UPLOAD_DIR):
         path = os.path.join(UPLOAD_DIR, name)
-        if os.path.isfile(path):
+        if os.path.isfile(path) and name != "_codes.json":
             items.append(
                 {
                     "id": name,
@@ -214,6 +224,7 @@ def list_items():
                     "size": os.path.getsize(path),
                     "link": None,
                     "created": datetime.fromtimestamp(os.path.getmtime(path)),
+                    "code": local_codes().get(name, ""),
                 }
             )
     return items
@@ -229,17 +240,35 @@ def refresh_list():
     list_items_cached.clear()
 
 
-def save_item(name: str, data: bytes):
+def local_codes() -> dict:
+    """임시 저장 모드에서 확인용 코드를 보관하는 작은 장부."""
+    path = os.path.join(UPLOAD_DIR, "_codes.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (ValueError, OSError):
+        return {}
+
+
+def save_item(name: str, data: bytes, code: str = ""):
     if GAS:
         gas_call(
             "upload",
             name=name,
             mime=mimetypes.guess_type(name)[0] or "application/octet-stream",
             data=base64.b64encode(data).decode("ascii"),
+            code=code,
         )
     else:
         with open(os.path.join(UPLOAD_DIR, name), "wb") as f:
             f.write(data)
+        if code:
+            book = local_codes()
+            book[name] = code
+            with open(os.path.join(UPLOAD_DIR, "_codes.json"), "w", encoding="utf-8") as f:
+                json.dump(book, f, ensure_ascii=False)
 
 
 def read_item(item) -> bytes:
@@ -296,6 +325,13 @@ if not GAS:
 # ----------------------------------------------------------------------
 with st.form("log_upload_form", clear_on_submit=True):
     activist_name = st.text_input("서포터즈 이름")
+    pin = st.text_input(
+        "확인번호 4자리 (직접 정하세요)",
+        max_chars=4,
+        placeholder="예: 1234",
+        help="제출 내역을 확인할 때 쓰입니다. 매번 같은 번호를 사용하세요. "
+             "번호 자체는 저장되지 않습니다.",
+    )
     log_date = st.date_input(
         "활동 일자 (지난 날짜도 선택 가능)",
         value=date.today(),
@@ -314,13 +350,19 @@ with st.form("log_upload_form", clear_on_submit=True):
 if submitted:
     if not activist_name.strip() or not uploaded_files:
         st.warning("이름과 파일을 모두 입력해주세요.")
+    elif not re.fullmatch(r"\d{4}", pin.strip()):
+        st.warning("확인번호를 숫자 4자리로 입력해주세요.")
     else:
-        base_name = f"{safe_field(activist_name)}_{log_date:%Y%m%d}_{safe_field(activity_type)}"
+        name_key = safe_field(activist_name)
+        my_code = person_code(name_key, pin.strip())
+        base_name = f"{name_key}_{log_date:%Y%m%d}_{safe_field(activity_type)}"
         proceed = True
 
         with st.spinner("제출 중입니다… 잠시만 기다려주세요."):
+            items_before = []
             try:
-                taken = {i["name"] for i in list_items()}
+                items_before = list_items()
+                taken = {i["name"] for i in items_before}
             except Exception as err:
                 st.error(f"저장소에 연결하지 못했습니다: {err}")
                 proceed = False
@@ -339,19 +381,102 @@ if submitted:
 
                     final_name = unique_name(taken, base_name, ext)
                     try:
-                        save_item(final_name, uploaded_file.getvalue())
+                        save_item(final_name, uploaded_file.getvalue(), my_code)
                         taken.add(final_name)
                         saved.append(final_name)
                     except Exception as err:
                         skipped.append(f"{uploaded_file.name} (저장 실패: {err})")
 
         if saved:
+            others = [
+                i for i in (items_before or [])
+                if (parse_name(i["name"]) or {}).get("name") == name_key
+                and i.get("code") and i["code"] != my_code
+            ]
+            if others:
+                st.info(
+                    f"같은 이름으로 다른 확인번호를 쓴 제출 내역이 {len(others)}건 있습니다. "
+                    "확인 화면에서는 번호가 같은 건만 보이니, 번호를 하나로 통일해 주세요."
+                )
             refresh_list()
             st.success(f"{activist_name}님, {len(saved)}개 파일이 제출되었습니다.")
             for name in saved:
                 st.caption(f"저장됨: {name}")
         if skipped:
             st.error("제출되지 않은 파일:\n" + "\n".join(f"- {s}" for s in skipped))
+
+# ----------------------------------------------------------------------
+# 내 제출 내역 확인 (서포터즈용)
+# ----------------------------------------------------------------------
+st.divider()
+
+with st.expander("📨 내 제출 내역 확인하기"):
+    st.caption("제출할 때 입력한 이름과 확인번호를 그대로 넣어주세요.")
+    c1, c2 = st.columns([2, 1])
+    who = c1.text_input("이름", key="my_name", placeholder="이름")
+    my_pin = c2.text_input(
+        "확인번호 4자리", key="my_pin", max_chars=4, placeholder="예: 1234"
+    )
+
+    if who.strip() and my_pin.strip():
+        if not re.fullmatch(r"\d{4}", my_pin.strip()):
+            st.warning("확인번호를 숫자 4자리로 입력해주세요.")
+        else:
+            wanted = person_code(safe_field(who), my_pin.strip())
+            try:
+                items = list_items_cached()
+            except Exception as err:
+                items = None
+                st.error(f"확인하지 못했습니다: {err}")
+
+            if items is not None:
+                my_key = safe_field(who)
+                mine, legacy = [], []
+                for i in items:
+                    info = parse_name(i["name"])
+                    if not info or info["name"] != my_key:
+                        continue
+                    if i.get("code"):
+                        if i["code"] == wanted:
+                            mine.append((i, info))
+                    else:
+                        legacy.append((i, info))  # 확인번호 도입 전 제출분
+
+                def by_recent(rows):
+                    return sorted(
+                        rows,
+                        key=lambda r: (r[1]["date"], r[0].get("created") or datetime.min),
+                        reverse=True,
+                    )
+
+                def show_rows(rows):
+                    for item, info in rows:
+                        st.write(f"**{info['date']:%Y-%m-%d}  ·  {info['type']}**")
+                        line = (
+                            f"{os.path.splitext(item['name'])[1].lstrip('.').upper()} 파일"
+                            f"  ·  {item['size'] / 1024:,.0f}KB"
+                        )
+                        if item.get("created"):
+                            line += f"  ·  제출 {item['created']:%m/%d %H:%M}"
+                        st.caption(line)
+
+                if not mine and not legacy:
+                    st.info(
+                        "제출 내역이 없습니다. 이름이나 확인번호가 제출할 때와 "
+                        "다를 수 있습니다. 번호가 기억나지 않으면 담당자에게 문의해주세요."
+                    )
+                else:
+                    st.success(f"총 {len(mine) + len(legacy)}건이 정상 제출되었습니다.")
+                    show_rows(by_recent(mine))
+
+                    if legacy:
+                        st.markdown("###### 확인번호 도입 전 제출분")
+                        st.caption(
+                            f"이름이 '{my_key}' 인 예전 제출분 {len(legacy)}건입니다. "
+                            "동명이인이 있다면 다른 분의 기록이 섞여 있을 수 있으니, "
+                            "본인 것이 맞는지 날짜로 확인해주세요."
+                        )
+                        show_rows(by_recent(legacy))
 
 # ----------------------------------------------------------------------
 # 관리자
@@ -418,20 +543,50 @@ if st.checkbox("관리자 확인용", key="admin_open"):
             if type_choice != "전체":
                 records = [r for r in records if r[1]["type"] == type_choice]
 
-            # ---- 서포터즈 이름으로 걸러내기 ----
-            people = {}
-            for _, info in records:
-                people[info["name"]] = people.get(info["name"], 0) + 1
-            name_options = ["전체"] + [
-                f"{n} ({c}건)" for n, c in sorted(people.items())
-            ]
+            # ---- 서포터즈별로 걸러내기 (동명이인은 확인번호로 구분) ----
+            groups = {}  # (이름, 코드) -> 건수
+            for item, info in records:
+                groups.setdefault((info["name"], item.get("code") or ""), []).append(
+                    (item, info)
+                )
+
+            # 같은 이름이 둘 이상의 확인번호로 나뉘면 ①②… 를 붙여 구분
+            by_person = {}
+            for name, code in groups:
+                by_person.setdefault(name, []).append(code)
+
+            CIRCLED = "①②③④⑤⑥⑦⑧⑨"
+            labels_map = {}  # 표시이름 -> (이름, 코드)
+            for name, codes in by_person.items():
+                coded = sorted(c for c in codes if c)
+                for key in sorted(codes):
+                    if not key:
+                        shown = f"{name} (확인번호 없음)"
+                    elif len(coded) > 1:
+                        mark = CIRCLED[coded.index(key) % len(CIRCLED)]
+                        shown = f"{name} {mark}"
+                    else:
+                        shown = name
+                    labels_map[f"{shown} ({len(groups[(name, key)])}건)"] = (name, key)
+
+            name_options = ["전체"] + sorted(labels_map)
             name_pick = st.selectbox(
-                "서포터즈", options=name_options, key="admin_person"
+                "서포터즈",
+                options=name_options,
+                key="admin_person",
+                help="같은 이름이 ①②로 나뉘면 확인번호가 다른 동명이인입니다.",
             )
             person_tag = ""
             if name_pick != "전체":
-                person_tag = name_pick.rsplit(" (", 1)[0]
-                records = [r for r in records if r[1]["name"] == person_tag]
+                pick_name, pick_code = labels_map[name_pick]
+                records = groups[(pick_name, pick_code)]
+                person_tag = name_pick.rsplit(" (", 1)[0].replace(" ", "")
+
+            if any(len(set(c)) > 1 for c in by_person.values()):
+                st.caption(
+                    "⚠️ 같은 이름에 확인번호가 여러 개 있습니다. "
+                    "동명이인이거나, 한 사람이 번호를 다르게 입력한 경우입니다."
+                )
 
             # ---- 묶는 기준 (활동일자 / 제출일시) ----
             has_created = any(i.get("created") for i, _ in records)
