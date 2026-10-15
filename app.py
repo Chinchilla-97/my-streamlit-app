@@ -410,7 +410,7 @@ if submitted:
 # ----------------------------------------------------------------------
 st.divider()
 
-with st.expander("📨 내 제출 내역 확인하기"):
+with st.expander("📨 내 제출 내역 확인하기", expanded=True):
     st.caption("제출할 때 입력한 이름과 확인번호를 그대로 넣어주세요.")
 
     with st.form("my_check_form"):
