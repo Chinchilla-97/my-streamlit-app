@@ -412,14 +412,17 @@ st.divider()
 
 with st.expander("📨 내 제출 내역 확인하기"):
     st.caption("제출할 때 입력한 이름과 확인번호를 그대로 넣어주세요.")
-    c1, c2 = st.columns([2, 1])
-    who = c1.text_input("이름", key="my_name", placeholder="이름")
-    my_pin = c2.text_input(
-        "확인번호 4자리", key="my_pin", max_chars=4, placeholder="예: 1234"
-    )
 
-    if who.strip() and my_pin.strip():
-        if not re.fullmatch(r"\d{4}", my_pin.strip()):
+    with st.form("my_check_form"):
+        c1, c2 = st.columns([2, 1])
+        who = c1.text_input("이름", placeholder="이름")
+        my_pin = c2.text_input("확인번호 4자리", max_chars=4, placeholder="예: 1234")
+        looked_up = st.form_submit_button("조회하기")
+
+    if looked_up:
+        if not who.strip() or not my_pin.strip():
+            st.warning("이름과 확인번호를 모두 입력해주세요.")
+        elif not re.fullmatch(r"\d{4}", my_pin.strip()):
             st.warning("확인번호를 숫자 4자리로 입력해주세요.")
         else:
             wanted = person_code(safe_field(who), my_pin.strip())
