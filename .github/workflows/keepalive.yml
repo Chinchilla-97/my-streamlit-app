@@ -1,0 +1,61 @@
+# 활동일지 앱이 잠들지 않도록 6시간마다 실제 브라우저로 접속합니다.
+# 저장 위치: .github/workflows/keepalive.yml
+
+name: keep-app-awake
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # 6시간마다 (UTC 기준)
+  workflow_dispatch:         # 수동 실행 버튼
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Playwright 설치
+        run: npm init -y && npm install playwright@1.49.1 && npx playwright install --with-deps chromium
+
+      - name: 앱 깨우기
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+        run: |
+          cat > keepalive.js << 'SCRIPT'
+          const { chromium } = require("playwright");
+
+          const URL = process.env.APP_URL;
+          if (!URL) {
+            console.error("APP_URL 시크릿이 비어 있습니다.");
+            process.exit(1);
+          }
+
+          (async () => {
+            const browser = await chromium.launch();
+            const page = await browser.newPage();
+
+            await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 90000 });
+
+            // 잠자기 화면이면 깨우기 버튼을 누른다
+            const wake = page.getByRole("button", { name: /get this app back up/i });
+            try {
+              await wake.waitFor({ timeout: 8000 });
+              console.log("잠들어 있어 깨우는 중...");
+              await wake.click();
+              await page.waitForTimeout(60000);
+            } catch {
+              console.log("이미 깨어 있습니다.");
+            }
+
+            // 방문이 집계되도록 잠시 머무른다
+            await page.waitForTimeout(15000);
+            console.log("완료");
+            await browser.close();
+          })().catch((err) => {
+            console.error("실패:", err.message);
+            process.exit(1);
+          });
+          SCRIPT
+          node keepalive.js
